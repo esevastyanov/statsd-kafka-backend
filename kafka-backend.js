@@ -22,6 +22,7 @@ let util = require('util'),
 
 let debug;
 let restProxyUrl;
+let restApiVersion;
 let kafkaTopic;
 
 // prefix configuration
@@ -85,7 +86,7 @@ let post_stats = function kafka_publish_stats(metricsArray) {
             options.method = 'POST';
             options.headers = {
                 'Content-Length': data.length,
-                'Content-Type': 'application/vnd.kafka.json.v2+json',
+                'Content-Type': 'application/vnd.kafka.json.'+ restApiVersion + '+json',
                 'Accept': 'application/json'
             };
 
@@ -217,6 +218,7 @@ exports.init = function kafka_init(startup_time, config, events) {
     debug = config.debug;
     prefixStats = config.prefixStats;
     restProxyUrl = config.restProxyUrl;
+    restApiVersion = config.restApiVersion ? config.restApiVersion : "v1";
     kafkaTopic = config.kafkaTopic;
     config.kafka = config.kafka || {};
     globalPrefix = config.kafka.globalPrefix;
