@@ -68,6 +68,7 @@ let post_stats = function kafka_publish_stats(metricsArray) {
     if (restProxyUrl) {
         try {
             let starttime = Date.now();
+            let ts = Math.round(new Date().getTime() / 1000);
             let namespace = globalNamespace.concat(prefixStats).join('.');
 
             metricsArray.push(new metric(namespace + '.kafkaStats.last_exception', last_exception, ts, "gauge"));
@@ -76,7 +77,7 @@ let post_stats = function kafka_publish_stats(metricsArray) {
             metricsArray.push(new metric(namespace + '.kafkaStats.flush_length', flush_length, ts, "timer"));
 
             let kafkaMetricsObject = {
-                'records': metricsArray.map(m => {'value':  m})
+                'records': metricsArray.map(m => ({ 'value' :  m }))
             };
             let data = JSON.stringify(kafkaMetricsObject);
 
@@ -139,6 +140,7 @@ let flush_stats = function kafka_flush(ts, metrics) {
     let counters = metrics.counters;
     let gauges = metrics.gauges;
     let sets = metrics.sets;
+    let counter_rates = metrics.counter_rates;
     let timer_data = metrics.timer_data;
     let statsd_metrics = metrics.statsd_metrics;
 
