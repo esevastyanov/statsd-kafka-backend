@@ -13,30 +13,6 @@
  *
  *   restProxyUrl: comma-separate list of broker nodes
  *
- * example output:
- * {
- *   "gauges": {
- *     "stats_counts.statsd.bad_lines_seen": 0,
- *     "stats_counts.statsd.packets_received": 63,
- *     "stats_counts.statsd.metrics_received": 63,
- *     "stats.gauges.not-configured-app.v0.api.response-code.500.m1_rate": 0,
- *     "stats.gauges.not-configured-app.v0.api.response-code.500.m5_rate": 0,
- *     "stats.gauges.not-configured-app.v0.api.response-code.500.m15_rate": 0,
- *     "stats.gauges.not-configured-app.v0.api.response-code.500.mean_rate": 0,
- *     "stats.gauges.statsd.timestamp_lag": 0,
- *     "statsd.numStats": 0,
- *     "stats.statsd.kafkaStats.calculationtime": 0,
- *     "stats.statsd.processing_time": 0,
- *     "stats.statsd.kafkaStats.last_exception": 1462375567,
- *     "stats.statsd.kafkaStats.last_flush": 1462375587,
- *     "stats.statsd.kafkaStats.flush_time": 59,
- *     "stats.statsd.kafkaStats.flush_length": 4793
- *   },
- *   "durationUnit": "milliseconds",
- *   "clock": 1462375597,
- *   "rateUnit": "seconds"
- * }
- *
  */
 
 let util = require('util'),
@@ -66,11 +42,24 @@ let setsNamespace = [];
 
 let kafkaStats = {};
 
-function metric(val) {
-    return val;
+function metric(path, val, timestamp, type) {
+    let pathParts = path.split(";")
+    // Metric name
+    let metric = pathParts.find(p => p.indexOf("=") === -1);
+    let thisMetric = this;
+    // Tags
+    pathParts
+      .filter(p => p.indexOf('=') !== -1)
+      .map(p => p.split("=", 2))
+      .filter(ts => ts.length == 2)
+      .forEach(ts => thisMetric[ts[0]] = ts[1]);
+    this.metric = metric != null ? metric : "undefined";
+    this.value = val;
+    this.timestamp = timestamp;
+    this.type = type;
 }
 
-let post_stats = function kafka_publish_stats(metricsObject) {
+let post_stats = function kafka_publish_stats(metricsArray) {
     let last_flush = kafkaStats.last_flush || 0;
     let last_exception = kafkaStats.last_exception || 0;
     let flush_time = kafkaStats.flush_time || 0;
@@ -81,17 +70,13 @@ let post_stats = function kafka_publish_stats(metricsObject) {
             let starttime = Date.now();
             let namespace = globalNamespace.concat(prefixStats).join('.');
 
-            metricsObject.gauges[namespace + '.kafkaStats.last_exception'] = metric(last_exception);
-            metricsObject.gauges[namespace + '.kafkaStats.last_flush'] = metric(last_flush);
-            metricsObject.gauges[namespace + '.kafkaStats.flush_time'] = metric(flush_time);
-            metricsObject.gauges[namespace + '.kafkaStats.flush_length'] = metric(flush_length);
+            metricsArray.push(new metric(namespace + '.kafkaStats.last_exception', last_exception, ts, "gauge"));
+            metricsArray.push(new metric(namespace + '.kafkaStats.last_flush', last_flush, ts, "gauge"));
+            metricsArray.push(new metric(namespace + '.kafkaStats.flush_time', flush_time, ts, "timer"));
+            metricsArray.push(new metric(namespace + '.kafkaStats.flush_length', flush_length, ts, "timer"));
 
             let kafkaMetricsObject = {
-                'records': [
-                    {
-                        'value': metricsObject
-                    }
-                ]
+                'records': metricsArray.map(m => {'value':  m})
             };
             let data = JSON.stringify(kafkaMetricsObject);
 
@@ -99,7 +84,7 @@ let post_stats = function kafka_publish_stats(metricsObject) {
             options.method = 'POST';
             options.headers = {
                 'Content-Length': data.length,
-                'Content-Type': 'application/vnd.kafka.json.v1+json',
+                'Content-Type': 'application/vnd.kafka.json.v2+json',
                 'Accept': 'application/json'
             };
 
@@ -147,13 +132,7 @@ let post_stats = function kafka_publish_stats(metricsObject) {
 
 let flush_stats = function kafka_flush(ts, metrics) {
     let starttime = Date.now();
-    let metricsObject = {
-        'gauges': {},
-        'durationUnit': 'milliseconds',
-        'clock': ts,
-        'rateUnit': 'seconds'
-    };
-
+    let metricsArray = [];
     let numStats = 0;
     let key;
     let timer_data_key;
@@ -166,11 +145,14 @@ let flush_stats = function kafka_flush(ts, metrics) {
     for (key in counters) {
         let namespace = counterNamespace.concat(key);
         let value = counters[key];
+        let valuePerSecond = counter_rates[key]; // pre-calculated "per second" rate
 
         if (legacyNamespace === true) {
-            metricsObject.gauges['stats_counts.' + key] = metric(value);
+            metricsArray.push(new metric(namespace.join("."), valuePerSecond, ts, "gauge"));
+            metricsArray.push(new metric('stats_counts.' + key, value, ts, "count"));
         } else {
-            metricsObject.gauges[namespace.concat('count').join('.')] = metric(value);
+            metricsArray.push(new metric(namespace.concat('rate').join("."), valuePerSecond, ts, "gauge"));
+            metricsArray.push(new metric(namespace.concat('count').join("."), value, ts, "count"));
         }
     }
 
@@ -179,7 +161,7 @@ let flush_stats = function kafka_flush(ts, metrics) {
         let the_key = namespace.join('.');
         for (timer_data_key in timer_data[key]) {
             if (typeof (timer_data[key][timer_data_key]) === 'number') {
-                metricsObject.gauges[the_key + '.' + timer_data_key] = metric(timer_data[key][timer_data_key]);
+                metricsArray.push(new metric(the_key + '.' + timer_data_key, timer_data[key][timer_data_key], ts, "timer"));
             } else {
                 for (let timer_data_sub_key in timer_data[key][timer_data_key]) {
                     let mpath = the_key + '.' + timer_data_key + '.' + timer_data_sub_key;
@@ -187,7 +169,7 @@ let flush_stats = function kafka_flush(ts, metrics) {
                     if (debug) {
                         util.log(mval.toString());
                     }
-                    metricsObject.gauges[mpath] = metric(mval);
+                    metricsArray.push(new metric(mpath, mval, ts, "timer"));
                 }
             }
         }
@@ -195,32 +177,32 @@ let flush_stats = function kafka_flush(ts, metrics) {
 
     for (key in gauges) {
         let namespace = gaugesNamespace.concat(key);
-        metricsObject.gauges[namespace.join('.')] = metric(gauges[key]);
+        metricsArray.push(new metric(namespace.join("."), gauges[key], ts, "gauge"));
     }
 
     for (key in sets) {
         let namespace = setsNamespace.concat(key);
-        metricsObject.gauges[namespace.join('.') + '.count'] = metric(sets[key].values().length);
+        metricsArray.push(new metric(namespace.join(".") + '.count', sets[key].values().length, ts, "set"));
     }
 
     //these go into gauges object
     let namespace = globalNamespace.concat(prefixStats);
     if (legacyNamespace === true) {
-        metricsObject.gauges[prefixStats + '.numStats'] = metric(numStats);
-        metricsObject.gauges['stats.' + prefixStats + '.kafkaStats.calculationtime'] = metric(Date.now() - starttime);
+        metricsArray.push(new metric(prefixStats + '.numStats', numStats, ts, "count"));
+        metricsArray.push(new metric('stats.' + prefixStats + '.kafkaStats.calculationtime', (Date.now() - starttime), ts, "timer"));
         for (key in statsd_metrics) {
-            metricsObject.gauges['stats.' + prefixStats + '.' + key] = metric(statsd_metrics[key]);
+            metricsArray.push(new metric('stats.' + prefixStats + '.' + key, statsd_metrics[key], ts, "statsd"));
         }
     } else {
-        metricsObject.gauges[namespace.join('.') + '.numStats'] = metric(numStats);
-        metricsObject.gauges[namespace.join('.') + '.kafkaStats.calculationtime'] = metric(Date.now() - starttime);
+        metricsArray.push(new metric(namespace.join(".") + '.numStats', numStats, ts, "count"));
+        metricsArray.push(new metric(namespace.join(".") + '.kafkaStats.calculationtime', (Date.now() - starttime), ts, "timer"));
         for (key in statsd_metrics) {
             let the_key = namespace.concat(key);
-            metricsObject.gauges[the_key.join('.')] = metric(statsd_metrics[key]);
+            metricsArray.push(new metric(the_key.join("."), statsd_metrics[key], ts, "statsd"));
         }
     }
 
-    post_stats(metricsObject);
+    post_stats(metricsArray);
 };
 
 let backend_status = function kafka_status(writeCb) {
